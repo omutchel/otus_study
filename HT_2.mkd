@@ -1,0 +1,61 @@
+sudo apt-get install gnupg
+
+curl -fsSL https://pgp.mongodb.com/server-6.0.asc | \
+   sudo gpg -o /usr/share/keyrings/mongodb-server-6.0.gpg \
+   --dearmor
+
+echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-6.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/6.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-6.0.list
+
+sudo apt-get update
+
+sudo apt-get install -y mongodb-org
+
+sudo systemctl enable mongod
+
+sudo systemctl start mongod
+
+wget https://raw.githubusercontent.com/ozlerhakan/mongodb-json-files/master/datasets/city_inspections.json
+
+sudo mongoimport --type json -d u -c city -u admin --authenticationDatabase admin /root/city_inspections.json
+
+mongosh -u "admin" -p 
+
+use u;
+
+-- Поиск всех городов.
+
+db.city.find()
+
+-- Поиск количества городов по полю result с регистронезависимым сравнением.
+
+ db.city.find({"result" : /no violation/i }).count();
+ 
+ 
+-- Поиск городов с регистронезависимым названием new и без насилия.
+
+db.city.find( {$and :[{ "result" : /^no violation/i },{ "address.city": /new/i }]})
+
+-- + 2015 год
+
+db.city.find( {$and :[{ "result" : /^no violation/i },{ "date": /2015/ },{ "address.city": /new/i }]})
+
+-- добавляем условие поиска по 2015 или по 2016 году
+
+db.city.find( {$and :[{ "result" : /^no violation/i },{ $or: [ {"date": /2015/ }, { "date": /2016/} ] },{ "address.city": /new/i }]});
+
+-- Добавляем сортировку по почтовому коду
+
+db.city.find( {$and :[{ "result" : /^no violation/i },{ $or: [ {"date": /2015/ }, { "date": /2016/} ] },{ "address.city": /new/i }]}).limit(5).sort({"address.zip":1});
+
+-- Аггрегированный вывод с сортировкой по количеству
+
+db.city.aggregate([ {$group :  {_id : "$result", count_new_cities : {$sum : 1} } } ]).sort({ "count_new_cities" : 1 });
+
+-- Присвоим рэйтинг 5 всем безопасным адресам в /new/i городах
+
+db.city.updateMany( {$and :[{ "result" : /^no violation/i },{ "date": /2015/ },{ "address.city": /new/i }]},{$set: {"rate": 5}});
+
+
+-- Удалим все строки про адреса с насилием в 2015 в городах /so/i
+
+db.city.deleteMany( {$and :[{ "result" : /^violation/i },{ "date": /2015/ },{ "address.city": /SO/i }]});
