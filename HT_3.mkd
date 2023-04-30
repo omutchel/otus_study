@@ -1,0 +1,811 @@
+Необходимо:
+
+построить шардированный кластер из 3 кластерных нод( по 3 инстанса с репликацией) и с кластером конфига(3 инстанса);
+добавить балансировку, нагрузить данными, выбрать хороший ключ шардирования, посмотреть как данные перебалансируются между шардами;
+поронять разные инстансы, посмотреть, что будет происходить, поднять обратно. Описать что произошло.
+настроить аутентификацию и многоролевой доступ;
+
+-- Создадим репликасет с конфигурацией шарда
+
+-- На сервере mongo-db1
+
+sudo mkdir /db/mongo && sudo mkdir /db/mongo/{dbc1,dbc2,dbc3} && sudo chmod 777 /db/mongo/{dbc1,dbc2,dbc3}
+
+mongod --configsvr --dbpath /db/mongo/dbc1 --bind_ip_all --port 27001 --replSet RScfg --fork --logpath /db/mongo/dbc1/dbc1.log --pidfilepath /db/mongo/dbc1/dbc1.pid
+
+mongod --configsvr --dbpath /db/mongo/dbc2 --bind_ip_all --port 27002 --replSet RScfg --fork --logpath /db/mongo/dbc2/dbc2.log --pidfilepath /db/mongo/dbc2/dbc2.pid
+
+mongod --configsvr --dbpath /db/mongo/dbc3 --bind_ip_all --port 27003 --replSet RScfg --fork --logpath /db/mongo/dbc3/dbc3.log --pidfilepath /db/mongo/dbc3/dbc3.pid
+
+-- Инициализируем конфигурацию.
+
+rs.initiate({"_id" : "RScfg", configsvr: true, members : [{"_id" : 0, priority : 3, host : "mongo-db1:27001"},{"_id" : 1, host : "mongo-db1:27002"},{"_id" : 2, host : "mongo-db1:27003"}]});
+
+-- На сервере mongo-db2
+
+-- Создадим 2 репликасета
+
+sudo sudo mkdir /db/mongo{db1,db2,db3,db4,db5,db6} && sudo chmod 777 /db/mongo{db1,db2,db3,db4,db5,db6}
+
+mongod --shardsvr --dbpath /db/mongodb1 --bind_ip_all --port 27011 --replSet RS1 --fork --logpath /db/mongodb1/db1.log --pidfilepath /db/mongodb1/db1.pid
+
+mongod --shardsvr --dbpath /db/mongodb2 --bind_ip_all --port 27012 --replSet RS1 --fork --logpath /db/mongodb2/db2.log --pidfilepath /db/mongodb2/db2.pid
+
+mongod --shardsvr --dbpath /db/mongodb3 --bind_ip_all --port 27013 --replSet RS1 --fork --logpath /db/mongodb3/db3.log --pidfilepath /db/mongodb3/db3.pid
+
+mongod --shardsvr --dbpath /db/mongodb4 --bind_ip_all --port 27021 --replSet RS2 --fork --logpath /db/mongodb4/db4.log --pidfilepath /db/mongodb4/db4.pid
+
+mongod --shardsvr --dbpath /db/mongodb5 --bind_ip_all --port 27022 --replSet RS2 --fork --logpath /db/mongodb5/db5.log --pidfilepath /db/mongodb5/db5.pid
+
+mongod --shardsvr --dbpath /db/mongodb6 --bind_ip_all --port 27023 --replSet RS2 --fork --logpath /db/mongodb6/db6.log --pidfilepath /db/mongodb6/db6.pid
+
+--Инициализируем 1-st Replica Set
+
+mongosh --port 27011
+
+rs.initiate({"_id" : "RS1", members : [{"_id" : 0, priority : 3, host : "mongo-db2:27011"},{"_id" : 1, host : "mongo-db2:27012"},{"_id" : 2, host : "mongo-db2:27013", arbiterOnly : true}]});
+
+
+--Инициализируем 2-nd Replica Set
+
+mongosh --port 27021
+
+rs.initiate({"_id" : "RS2", members : [{"_id" : 0, priority : 3, host : "mongo-db2:27021"},{"_id" : 1, host : "mongo-db2:27022"},{"_id" : 2, host : "mongo-db2:27023", arbiterOnly : true}]});
+
+
+-- Создадим шардированный кластер
+
+mongos --configdb RScfg/mongo-db1:27001,mongo-db1:27002,mongo-db1:27003 --port 27000
+
+-- запускаем в 2 экземплярах для отказоустойчивости
+
+-- На сервере mongo-db1
+
+mongos --configdb RScfg/mongo-db1:27001,mongo-db1:27002,mongo-db1:27003 --bind_ip_all --port 27000 --fork --logpath /db/mongo/dbc1/dbs.log --pidfilepath /db/mongo/dbc1/dbs.pid 
+
+mongos --configdb RScfg/mongo-db1:27001,mongo-db1:27002,mongo-db1:27003 --bind_ip_all --port 27100 --fork --logpath /db/mongo/dbc1/dbs2.log --pidfilepath /db/mongo/dbc1/dbs2.pid 
+
+
+-- Добавляем шарды
+
+mongosh --port 27000
+> db.adminCommand({ "setDefaultRWConcern": 1, "defaultWriteConcern": { "w": 1 }, "defaultReadConcern": { "level": "majority" } })
+>
+> sh.addShard("RS1/mongo-db2:27011,mongo-db2:27012,mongo-db2:27013")
+>
+> sh.addShard("RS2/mongo-db2:27021,mongo-db2:27022,mongo-db2:27023")
+>
+> sh.status()
+
+
+нагенерим данные
+> use db;
+>
+> sh.enableSharding("db")
+>
+> use config
+>
+>
+> db.settings.updateOne(
+   { _id: "chunksize" },
+   { $set: { _id: "chunksize", value: 1 } },
+   { upsert: true }
+)
+
+--Скачаем дата сет https://dl.dropbox.com/s/gxbsj271j5pevec/trades.json и загрузим его в БД.
+
+mongoimport --port 27000 --type json -d db -c trades /home/omut/trades.json
+
+mongosh --port 27100
+
+> db.trades.updateMany({ rand: {$exists: false}}, [{ $set:{ rand: { $function: {
+>          body: function() { return Math.random(); },
+>          args: [],
+>          lang: "js"
+>      }}}}]);
+
+> db.trades.createIndex({rand: 1})
+>
+> db.trades.stats()
+
+Запускаем шардирование коллекции trades по индексному ключу ticket
+> use admin
+>
+> db.runCommand({shardCollection: "db.trades", key: {rand: 1}})
+>
+> db.runCommand({shardCollection: "db.trades", key: {ticket: "hashed"}})
+>
+> sh.status()
+
+
+Вывод:
+<pre><code>
+ shardingVersion
+ {
+   _id: 1,
+   minCompatibleVersion: 5,
+   currentVersion: 6,
+   clusterId: ObjectId("644533cd656b2fd72f266f5d")
+ }
+
+
+ shards
+ [
+  {
+    _id: 'RS1',
+    host: 'RS1/mongo-db2:27011,mongo-db2:27012',
+    state: 1,
+    topologyTime: Timestamp({ t: 1682258725, i: 1 })
+  },
+  {
+    _id: 'RS2',
+    host: 'RS2/mongo-db2:27021,mongo-db2:27022',
+    state: 1,
+    topologyTime: Timestamp({ t: 1682258739, i: 3 })
+  }
+]
+active mongoses
+[ { '6.0.5': 2 } ]
+autosplit
+{ 'Currently enabled': 'yes' }
+
+balancer
+{
+  'Currently enabled': 'yes',
+  'Currently running': 'no',
+  'Failed balancer rounds in last 5 attempts': 0,
+  'Migration Results for the last 24 hours': { '198': 'Success' }
+}
+
+databases
+[
+  {
+    database: { _id: 'config', primary: 'config', partitioned: true },
+    collections: {
+      'config.system.sessions': {
+        shardKey: { _id: 1 },
+        unique: false,
+        balancing: true,
+        chunkMetadata: [ { shard: 'RS1', nChunks: 1024 } ],
+        chunks: [
+          'too many chunks to print, use verbose if you want to force print'
+        ],
+        tags: []
+      }
+    }
+  },
+  {
+    database: {
+      _id: 'db',
+      primary: 'RS2',
+      partitioned: false,
+      version: {
+        uuid: new UUID("5ef4ea1d-6b53-4570-bd0f-37f26b0e2869"),
+        timestamp: Timestamp({ t: 1682261735, i: 6 }),
+        lastMod: 1
+      }
+    },
+    collections: {
+      'db.trades': {
+        shardKey: { ticket: 1 },
+        unique: false,
+        balancing: true,
+        chunkMetadata: [
+          { shard: 'RS1', nChunks: 198 },
+          { shard: 'RS2', nChunks: 1 }
+        ],
+        chunks: [
+          'too many chunks to print, use verbose if you want to force print'
+        ],
+        tags: []
+      }
+    }
+  }
+</code></pre>
+
+
+sh.balancerCollectionStatus("db.trades")
+<pre><code>
+{
+  chunkSize: 1,
+  balancerCompliant: true,
+  ok: 1,
+  '$clusterTime': {
+    clusterTime: Timestamp({ t: 1682263002, i: 1 }),
+    signature: {
+      hash: Binary(Buffer.from("0000000000000000000000000000000000000000", "hex"), 0),
+      keyId: Long("0")
+    }
+  },
+  operationTime: Timestamp({ t: 1682262995, i: 7 })
+}
+</code></pre>
+Получим распределение документов по шардам.
+
+db.trades.getShardDistribution();
+<pre><code>
+Shard RS1 at RS1/mongo-db2:27011,mongo-db2:27012
+{
+  data: '108.49MiB',
+  docs: 492500,
+  chunks: 197,
+  'estimated data per chunk': '563KiB',
+  'estimated docs per chunk': 2500
+}
+
+Shard RS2 at RS2/mongo-db2:27021,mongo-db2:27022
+{
+  data: '220.29MiB',
+  docs: 1000001,
+  chunks: 1,
+  'estimated data per chunk': '220.29MiB',
+  'estimated docs per chunk': 1000001
+}
+
+Totals
+{
+  data: '328.79MiB',
+  docs: 1492501,
+  chunks: 198,
+  'Shard RS1': [
+    '32.99 % data',
+    '32.99 % docs in cluster',
+    '231B avg obj size on shard'
+  ],
+  'Shard RS2': [ '67 % data', '67 % docs in cluster', '230B avg obj size on shard' ]
+}
+</code></pre>
+
+Даёт картину распределения данных в коллекции по значению ключа ticket
+
+db.trades.aggregate([ {$group :  {_id : "$ticket", count_ticket : {$sum : 1} } } ]).sort({ "_id" : 1 });
+<pre><code>
+  { _id: null, count_ticket: 1 },
+  { _id: 'z100', count_ticket: 2500 },
+  { _id: 'z101', count_ticket: 2500 },
+  { _id: 'z102', count_ticket: 2500 },
+  { _id: 'z103', count_ticket: 2500 },
+  { _id: 'z104', count_ticket: 2500 },
+  { _id: 'z105', count_ticket: 2500 },
+  { _id: 'z106', count_ticket: 2500 },
+  { _id: 'z107', count_ticket: 2500 },
+  { _id: 'z108', count_ticket: 2500 },
+  { _id: 'z109', count_ticket: 2500 },
+  { _id: 'z110', count_ticket: 2500 },
+  { _id: 'z111', count_ticket: 2500 },
+  { _id: 'z112', count_ticket: 2500 },
+  { _id: 'z113', count_ticket: 2500 },
+  { _id: 'z114', count_ticket: 2500 },
+  { _id: 'z115', count_ticket: 2500 },
+  { _id: 'z116', count_ticket: 2500 },
+  { _id: 'z117', count_ticket: 2500 },
+  { _id: 'z118', count_ticket: 2500 }
+]</code></pre>
+В итоге балансировка закончилась и получаем такую картину
+
+db.trades.getShardDistribution();
+<pre><code>Shard RS2 at RS2/mongo-db2:27021,mongo-db2:27022
+{
+  data: '111.25MiB',
+  docs: 505000,
+  chunks: 1,
+  'estimated data per chunk': '111.25MiB',
+  'estimated docs per chunk': 505000
+}
+---
+Shard RS1 at RS1/mongo-db2:27011,mongo-db2:27012
+{
+  data: '109.04MiB',
+  docs: 495001,
+  chunks: 198,
+  'estimated data per chunk': '563KiB',
+  'estimated docs per chunk': 2500
+}
+---
+Totals
+{
+  data: '220.29MiB',
+  docs: 1000001,
+  chunks: 199,
+  'Shard RS2': [
+    '50.49 % data',
+    '50.49 % docs in cluster',
+    '231B avg obj size on shard'
+  ],
+  'Shard RS1': [
+    '49.5 % data',
+    '49.5 % docs in cluster',
+    '230B avg obj size on shard'
+  ]
+}</code></pre>
+С учётом того, что документы равномерно распределяются между значениями ключа tickets(по 2500 тысячи на каждое значение ключа ticket), непонятно почему на одном шарде - 199 чанков, а на другом 1.
+<pre><code>Shard RS2 at RS2/mongo-db2:27021,mongo-db2:27022
+{
+  data: '118.21MiB',
+  docs: 505961,
+  chunks: 1,
+  'estimated data per chunk': '118.21MiB',
+  'estimated docs per chunk': 505961
+}
+---
+Shard RS1 at RS1/mongo-db2:27011,mongo-db2:27012
+{
+  data: '115.43MiB',
+  docs: 494040,
+  chunks: 115,
+  'estimated data per chunk': '1MiB',
+  'estimated docs per chunk': 4296
+}
+---
+Totals
+{
+  data: '233.65MiB',
+  docs: 1000001,
+  chunks: 116,
+  'Shard RS2': [
+    '50.59 % data',
+    '50.59 % docs in cluster',
+    '244B avg obj size on shard'
+  ],
+  'Shard RS1': [
+    '49.4 % data',
+    '49.4 % docs in cluster',
+    '245B avg obj size on shard'
+  ]
+}</code></pre>
+
+Уронили по одной инстанции на каждом replica set на портах 27011 и 27022
+Картина в целом по кластеру не изменилась.
+
+[direct: mongos] db> db.trades.getShardDistribution(true);
+<pre><code>Shard RS1 at RS1/mongo-db2:27011,mongo-db2:27012
+{
+  data: '115.43MiB',
+  docs: 494040,
+  chunks: 115,
+  'estimated data per chunk': '1MiB',
+  'estimated docs per chunk': 4296
+}
+---
+Shard RS2 at RS2/mongo-db2:27021,mongo-db2:27022
+{
+  data: '118.21MiB',
+  docs: 505961,
+  chunks: 1,
+  'estimated data per chunk': '118.21MiB',
+  'estimated docs per chunk': 505961
+}
+---
+Totals
+{
+  data: '233.65MiB',
+  docs: 1000001,
+  chunks: 116,
+  'Shard RS1': [
+    '49.4 % data',
+    '49.4 % docs in cluster',
+    '245B avg obj size on shard'
+  ],
+  'Shard RS2': [
+    '50.59 % data',
+    '50.59 % docs in cluster',
+    '244B avg obj size on shard'
+  ]
+}</code></pre>
+
+sh.status();
+<pre><code>
+shardingVersion
+{
+  _id: 1,
+  minCompatibleVersion: 5,
+  currentVersion: 6,
+  clusterId: ObjectId("644533cd656b2fd72f266f5d")
+}
+---
+shards
+[
+  {
+    _id: 'RS1',
+    host: 'RS1/mongo-db2:27011,mongo-db2:27012',
+    state: 1,
+    topologyTime: Timestamp({ t: 1682258725, i: 1 })
+  },
+  {
+    _id: 'RS2',
+    host: 'RS2/mongo-db2:27021,mongo-db2:27022',
+    state: 1,
+    topologyTime: Timestamp({ t: 1682258739, i: 3 })
+  }
+]
+---
+active mongoses
+[ { '6.0.5': 2 } ]
+---
+autosplit
+{ 'Currently enabled': 'yes' }
+---
+balancer
+{
+  'Currently enabled': 'yes',
+  'Currently running': 'no',
+  'Failed balancer rounds in last 5 attempts': 0,
+  'Migration Results for the last 24 hours': 'No recent migrations'
+}
+---
+databases
+[
+  {
+    database: { _id: 'config', primary: 'config', partitioned: true },
+    collections: {
+      'config.system.sessions': {
+        shardKey: { _id: 1 },
+        unique: false,
+        balancing: true,
+        chunkMetadata: [ { shard: 'RS1', nChunks: 1024 } ],
+        chunks: [
+          'too many chunks to print, use verbose if you want to force print'
+        ],
+        tags: []
+      }
+    }
+  },
+  {
+    database: {
+      _id: 'db',
+      primary: 'RS2',
+      partitioned: false,
+      version: {
+        uuid: new UUID("5ef4ea1d-6b53-4570-bd0f-37f26b0e2869"),
+        timestamp: Timestamp({ t: 1682261735, i: 6 }),
+        lastMod: 1
+      }
+    },
+    collections: {
+      'db.trades': {
+        shardKey: { rand: 1 },
+        unique: false,
+        balancing: true,
+        chunkMetadata: [
+          { shard: 'RS1', nChunks: 115 },
+          { shard: 'RS2', nChunks: 1 }
+        ],
+        chunks: [
+          'too many chunks to print, use verbose if you want to force print'
+        ],
+        tags: []
+      }
+    }
+  }
+]</code></pre>
+но при подключении к оставшейся в живых ноде для RS1 
+
+mongosh --port 27013
+
+Статус для убитой ноды
+
+rs.status();
+<pre><code>
+
+  members: [
+    {
+      _id: 0,
+      name: 'mongo-db2:27011',
+      health: 0,
+      state: 8,
+      stateStr: '(not reachable/healthy)',
+      lastHeartbeatMessage: 'Error connecting to mongo-db2:27011 (192.168.1.25:27011) :: caused by :: Connection refused',
+ ......
+
+    _id: 1,
+      name: 'mongo-db2:27012',
+      health: 1,
+      state: 1,
+      stateStr: 'PRIMARY',
+
+аналогичная картина по RS2
+
+  members: [
+    {
+      _id: 0,
+      name: 'mongo-db2:27021',
+      health: 1,
+      state: 1,
+      stateStr: 'PRIMARY',
+
+   {
+      _id: 1,
+      name: 'mongo-db2:27022',
+      health: 0,
+      state: 8,
+      stateStr: '(not reachable/healthy)',
+</code></pre>
+
+
+После запуска mongo-db2:27011
+<pre><code>
+  members: [
+    {
+      _id: 0,
+      name: 'mongo-db2:27011',
+      health: 1,
+      uptime: 7,
+     state: 2,
+      stateStr: 'SECONDARY',
+      syncSourceHost: 'mongo-db2:27012',
+
+Затем статус изменился на
+      stateStr: 'PRIMARY',
+</code></pre>
+
+При запуске ноды для RS2 mongo-db2:27022
+
+RS2 также восстановился.
+
+Убил полностью RS1 ноды для данных, оставил только арбитра
+<pre><code>
+  members: [
+    {
+      _id: 0,
+      name: 'mongo-db2:27011',
+      health: 0,
+      state: 8,
+      stateStr: '(not reachable/healthy)',
+
+   {
+      _id: 1,
+      name: 'mongo-db2:27012',
+      health: 0,
+      state: 8,
+      stateStr: '(not reachable/healthy)',
+
+   {
+      _id: 2,
+      name: 'mongo-db2:27013',
+      health: 1,
+      state: 7,
+      stateStr: 'ARBITER',
+</code></pre>
+sh.status(); - отрабатывает.
+<pre><code>
+shardingVersion
+{
+  _id: 1,
+  minCompatibleVersion: 5,
+  currentVersion: 6,
+  clusterId: ObjectId("644533cd656b2fd72f266f5d")
+}
+---
+shards
+[
+  {
+    _id: 'RS1',
+    host: 'RS1/mongo-db2:27011,mongo-db2:27012',
+    state: 1,
+    topologyTime: Timestamp({ t: 1682258725, i: 1 })
+  },
+  {
+    _id: 'RS2',
+    host: 'RS2/mongo-db2:27021,mongo-db2:27022',
+    state: 1,
+    topologyTime: Timestamp({ t: 1682258739, i: 3 })
+  }
+]
+---
+active mongoses
+[ { '6.0.5': 2 } ]
+---
+autosplit
+{ 'Currently enabled': 'yes' }
+---
+balancer
+{
+  'Currently enabled': 'yes',
+  'Currently running': 'yes',
+  'Failed balancer rounds in last 5 attempts': 0,
+  'Migration Results for the last 24 hours': 'No recent migrations'
+}
+---
+databases
+[
+  {
+    database: { _id: 'config', primary: 'config', partitioned: true },
+    collections: {
+      'config.system.sessions': {
+        shardKey: { _id: 1 },
+        unique: false,
+        balancing: true,
+        chunkMetadata: [ { shard: 'RS1', nChunks: 1024 } ],
+        chunks: [
+          'too many chunks to print, use verbose if you want to force print'
+        ],
+        tags: []
+      }
+    }
+  },
+  {
+    database: {
+      _id: 'db',
+      primary: 'RS2',
+      partitioned: false,
+      version: {
+        uuid: new UUID("5ef4ea1d-6b53-4570-bd0f-37f26b0e2869"),
+        timestamp: Timestamp({ t: 1682261735, i: 6 }),
+        lastMod: 1
+      }
+    },
+    collections: {
+      'db.trades': {
+        shardKey: { rand: 1 },
+        unique: false,
+        balancing: true,
+        chunkMetadata: [
+          { shard: 'RS1', nChunks: 115 },
+          { shard: 'RS2', nChunks: 1 }
+        ],
+        chunks: [
+          'too many chunks to print, use verbose if you want to force print'
+        ],
+        tags: []
+      }
+    }
+  }
+]</code></pre>
+
+
+[direct: mongos] db> db.trades.find().count();
+
+и 
+
+[direct: mongos] db> db.trades.getShardDistribution();
+
+выдавали ошибку
+
+MongoServerError: failed on: RS1 :: caused by :: Could not find host matching read preference { mode: "primary" } for set RS1
+
+после запуска всех процессов связанных с RS1 статус дистрибьюции опять начал отрабатывать.
+
+интересный начальный статус RS1
+<pre><code>
+  members: [
+    {
+      _id: 0,
+      name: 'mongo-db2:27011',
+      health: 1,
+      state: 2,
+      stateStr: 'SECONDARY',
+      uptime: 3,
+    },
+    {
+      _id: 1,
+      name: 'mongo-db2:27012',
+      health: 1,
+      state: 2,
+      stateStr: 'SECONDARY',
+    },
+
+затем перешли в нормальный статус.
+
+  members: [
+    {
+      _id: 0,
+      name: 'mongo-db2:27011',
+      health: 1,
+      state: 1,
+      stateStr: 'PRIMARY',
+    {
+      _id: 1,
+      name: 'mongo-db2:27012',
+      health: 1,
+      state: 2,
+      stateStr: 'SECONDARY',
+
+
+</code></pre>
+Права доступа.
+<pre><code>
+mkdir /db/mongodb15 && chmod 777 /db/mongodb15
+mongod --dbpath /db/mongodb15 --port 27005 --fork --logpath /db/mongodb15/db5.log --pidfilepath /db/mongodb15/db5.pid
+
+mongosh --port 27005
+db = db.getSiblingDB("admin")
+db.createRole(
+    {      
+     role: "superPerm",      
+     privileges:[
+        { resource: {anyResource:true}, actions: ["anyAction"]}
+     ],      
+     roles:[] 
+    }
+)
+db.createUser({      
+     user: "DBA",      
+     pwd: "12User23!",      
+     roles: ["superPerm"] 
+})
+
+admin> db.system.roles.find();
+[
+  {
+    _id: 'admin.superPerm',
+    role: 'superPerm',
+    db: 'admin',
+    privileges: [ { resource: { anyResource: true }, actions: [ 'anyAction' ] } ],
+    roles: []
+  }
+]
+
+admin> db.system.users.find()
+[
+  {
+    _id: 'admin.DBA',
+    userId: new UUID("306b01ae-1858-436d-a438-199c41980371"),
+    user: 'DBA',
+    db: 'admin',
+    credentials: {
+      'SCRAM-SHA-1': {
+        iterationCount: 10000,
+        salt: 'AnvIw90g4CAutbpeh1FLqQ==',
+        storedKey: 'eF6nCGAh4PRd6WW4xkD2CI8kQto=',
+        serverKey: 'xKQ03xUTR2rnTH8NK/e5J3RX6oo='
+      },
+      'SCRAM-SHA-256': {
+        iterationCount: 15000,
+        salt: 'bblkcHZatj7JQ/guIE/62BUhF7CFp5UIZYSgUg==',
+        storedKey: '1F75m0CyPxUcIIftoPGTjU5ZyUyraZct/waBmyTPvF8=',
+        serverKey: 'jEeAT4VkoYCnox55m2mJtN9cRGANUdxvhRbanIRmDck='
+      }
+    },
+    roles: [ { role: 'superPerm', db: 'admin' } ]
+  }
+]
+db.shutdownServer()
+</code></pre>
+
+запускаем сервер с аутентификацией
+
+mongod --dbpath /db/mongodb15 --port 27005 --auth --fork --logpath /db/mongodb15/db5.log --pidfilepath /db/mongodb15/db5.pid
+
+Без аутентификации
+mongosh --port 27005
+<pre><code>admin> db.system.users.find()
+MongoServerError: command find requires authentication
+</code></pre>
+
+С аутентификацией
+
+<pre><code>mongosh --port 27005 -u DBA -p 12User23! --authenticationDatabase "admin"
+show databases
+admin   240.00 KiB
+config   60.00 KiB
+local    72.00 KiB
+</code></pre>
+
+Создадим read only user for report
+<pre><code>db.createUser({      
+     user: "readonly",      
+     pwd: "Ufdg%4",      
+     roles: [{role: "read",db: "report_db"}] 
+})</code></pre>
+
+mongosh report_db --port 27005 -u DBA -p 12User23! --authenticationDatabase "admin"
+report.insert({"name":"Ivan","user_id":1});
+
+mongosh report_db --port 27005 -u readonly -p Ufdg%4 --authenticationDatabase "admin"
+
+report.insert({"name":"Alex","user_id":2});
+
+Получаем ошибку.
+
+MongoBulkWriteError: not authorized on report_db to execute command { insert: "report", documents: [ { name: "Alex", user_id: 2, _id: ObjectId('644b44d8dac128111060e826') } ], ordered: true, lsid: { id: UUID("fdb01894-28c5-467d-857e-a7f6d34cc8bb") }, $db: "report_db" }
+
+Поиск выполняет:
+<pre><code>report_db> db.report.find();
+[
+  {
+    _id: ObjectId("644b4466e58c212b74fad075"),
+    name: 'Ivan',
+    user_id: 1
+  }
+]
+</code></pre>
