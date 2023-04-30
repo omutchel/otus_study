@@ -1,0 +1,147 @@
+yc compute instance create \
+  --name couch-base-db1 \
+  --hostname couch-base-db1 \
+  --create-boot-disk size=20G,type=network-ssd,image-folder-id=standard-images,image-family=ubuntu-2004-lts \
+  --network-interface subnet-name=default-ru-central1-c,nat-ip-version=ipv4 \
+  --zone ru-central1-c \
+  --preemptible=true \
+  --metadata-from-file ssh-keys=/root/yc/ssh-key| tee -a couch-base-db1.log
+
+yc compute instance create \
+  --name couch-base-db2 \
+  --hostname couch-base-db2 \
+  --create-boot-disk size=20G,type=network-ssd,image-folder-id=standard-images,image-family=ubuntu-2004-lts \
+  --network-interface subnet-name=default-ru-central1-c,nat-ip-version=ipv4 \
+  --zone ru-central1-c \
+  --preemptible=true \
+  --metadata-from-file ssh-keys=/root/yc/ssh-key | tee -a couch-base-db3.log
+
+yc compute instance create \
+  --name couch-base-db3 \
+  --hostname couch-base-db3 \
+  --create-boot-disk size=20G,type=network-ssd,image-folder-id=standard-images,image-family=ubuntu-2004-lts \
+  --network-interface subnet-name=default-ru-central1-c,nat-ip-version=ipv4 \
+  --zone ru-central1-c \
+  --preemptible=true \
+  --metadata-from-file ssh-keys=/root/yc/ssh-key | tee -a couch-base-db3.log
+
+yc compute instance create \
+  --name couch-base-db4 \
+  --hostname couch-base-db4 \
+  --create-boot-disk size=20G,type=network-ssd,image-folder-id=standard-images,image-family=ubuntu-2004-lts \
+  --network-interface subnet-name=default-ru-central1-c,nat-ip-version=ipv4 \
+  --zone ru-central1-c \
+  --preemptible=true \
+  --metadata-from-file ssh-keys=/root/yc/ssh-key | tee -a couch-base-db4.log
+
+
+Устанавливаем couch-base
+
+sudo apt-get update && sudo apt-get upgrade -y && curl -O https://packages.couchbase.com/releases/couchbase-release/couchbase-release-1.0-amd64.deb && sudo dpkg -i ./couchbase-release-1.0-amd64.deb && sudo apt-get update && sudo apt-get install couchbase-server -y
+
+Проверяем наличие сервиса
+sudo systemctl list-units --type service | grep couchbase
+
+-- Список открытых портов.
+lsof -i -P -n | grep LISTEN
+
+Заходим на https://x.x.x.x:18091
+и создаём в web интерфейсе кластер начиная с одного узла
+couch-base-db1.ru-central1.internal
+
+-- добавим ноды в кластер по FQDN
+
+couch-base-db2.ru-central1.internal
+
+couch-base-db3.ru-central1.internal
+
+couch-base-db4.ru-central1.internal
+
+
+
+-- попробуем ноду couch-base-db4.ru-central1.internal добавить со всеми галочками
+
+Получаем ошибку.
+
+Warning: Adding a server to this cluster means any previous Couchbase Server data on that server will be removed.
+This cluster is using self-signed certificates. No peer verification between nodes will be done.
+Attention: Prepare join failed. This server does not have sufficient memory to support requested memory quota. Total quota is 2354MB (services: backup, cbas, eventing, fts, index, kv, n1ql), maximum allowed quota for the node is 1586MB.
+
+Увеличичиваем на ней память до 4GB
+
+yc compute instance update  couch-base-db4.ru-central1.internal --memory 4
+
+После этого добавление проходит без ошибок.
+
+Запускаем rebalance в веб интерфейсе.
+
+Далее загружаем sample data beer-data через web интерфейс.
+
+Выполняем запросы к БД.
+Данные извлекаются.
+После чего роняем один из узлов.
+
+yc compute instance stop couch-base-db4.ru-central1.internal
+
+Статус этой ноды поменялся на 
+Node unresponsive, failed-over | Not available for traffic | REBALANCE to finish removing node
+
+Статус бакета beer-sample сменился на
+1 node not responding
+данные не показываются.
+
+После 5 sec данные их коллекции продолжили извлекаться.
+
+Делаем ручной rebalance.
+
+Остаётся три ноды
+couch-base-db1.ru-central1.internal
+couch-base-db2.ru-central1.internal
+couch-base-db3.ru-central1.internal
+
+
+yc compute instance start couch-base-db4.ru-central1.internal
+
+Сама нода не вернулась обратно в кластер.
+
+Пробуем ещё раз её добавить, уронить и загрузить, без ручной ребалансировки.
+
+Статус ноды couch-base-db4.ru-central1.internal поменялся на 
+Node unresponsive | Not available for traffic | FAILOVER to activate any available replicas
+
+Статус бакета beer-sample сменился на
+1 node not responding
+данные не показываются.
+
+После 5 sec данные их коллекции продолжили извлекаться.
+
+После включения ноды couch-base-db4.ru-central1.internal
+
+Появилось сообщение
+<pre><code>
+This server is now reachable. Do you want to add it back to the cluster on the next rebalance?
+</code></pre>
+
+В двух режимах 
+<pre><code>
+Add Back: Full Recovery or Add Back: Delta Recovery
+</code></pre>
+
+Выбираем delta
+Статус ноды опять поменялся
+<pre><code>
+Node failed-over | Not available for traffic | REBALANCE to finish delta recovery
+</code></pre>
+После чего выбираем rebalance
+
+И получаем отчёт rebalanceReport.json(Прилагается)
+
+После чего получаем Failover Multiple Nodes
+<pre><code>
+Data Loss Warning: For hard failover of multiple nodes, each Couchbase bucket must have at least as many replicas as the total number of nodes failed over or you WILL lose data. Since hard failover removes nodes immediately it may also result in failure of in-flight operations.
+</code></pre>
+Выбираем опять ноду couch-base-db4.ru-central1.internal для Failover и происходит её выключение из кластера.
+
+После чего повторяем ручное добавление ноды couch-base-db4.ru-central1.internal
+
+Статус кластера нормализовался.
