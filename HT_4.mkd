@@ -1,3 +1,5 @@
+БД Couchbase Лекция №7
+
 yc compute instance create \
   --name couch-base-db1 \
   --hostname couch-base-db1 \
