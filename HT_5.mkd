@@ -1,0 +1,404 @@
+Создаём ВМ
+
+yc compute instance create  \
+  --name ch-db1 --hostname ch-db1 \ 
+  --create-boot-disk size=40G, type=network-ssd,image-folder-id=standard-images,image-family=ubuntu-2004-lts   \
+  --network-interface subnet-name=default-ru-central1-c,nat-ip-version=ipv4   \
+  --zone ru-central1-c  --metadata-from-file ssh-keys=/root/yc/ssh-key
+
+Устанавливаем  CH
+<pre><code>
+sudo apt-get install -y apt-transport-https ca-certificates dirmngr
+sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv 8919F6BD2B48D754
+
+echo "deb https://packages.clickhouse.com/deb stable main" | sudo tee \
+    /etc/apt/sources.list.d/clickhouse.list
+sudo apt-get update
+
+sudo apt-get install -y clickhouse-server clickhouse-client
+
+set password #####
+admin123
+sudo service clickhouse-server start
+</code></pre>
+
+Смотрим внутренности.
+<pre><code>
+clickhouse-client --password
+show databases;
+
+Query id: e8d828b6-7420-48d2-b61f-4a9fdde55371
+
+┌─name───────────────┐
+│ INFORMATION_SCHEMA │
+│ default            │
+│ information_schema │
+│ system             │
+└────────────────────┘
+
+</code></pre>
+
+Скачиваем набор данных с рецептами.
+
+https://recipenlg.cs.put.poznan.pl/dataset
+
+Распаковываем датасет и получаем файл full_dataset.csv, размером 2.2 GB
+
+Заходим в CH
+clickhouse-client --password
+
+и создаём таблицу recipes
+
+<pre><code>
+CREATE TABLE recipes
+(
+    title String,
+    ingredients Array(String),
+    directions Array(String),
+    link String,
+    source LowCardinality(String),
+    NER Array(String)
+) ENGINE = MergeTree ORDER BY title;
+
+Query id: 2f239997-4a9f-404f-afe0-6ba9d9522810
+
+Ok.
+
+0 rows in set. Elapsed: 0.016 sec.
+
+</code></pre>
+
+Для вставки данных используем след команду:
+<pre><code>
+clickhouse-client --query "
+    INSERT INTO recipes
+    SELECT
+        title,
+        JSONExtract(ingredients, 'Array(String)'),
+        JSONExtract(directions, 'Array(String)'),
+        link,
+        source,
+        JSONExtract(NER, 'Array(String)')
+    FROM input('num UInt32, title String, ingredients String, directions String, link String, source LowCardinality(String), NER String')
+    FORMAT CSVWithNames
+" --input_format_with_names_use_header 0 --format_csv_allow_single_quote 0 --input_format_allow_errors_num 10 < full_dataset.csv
+</code></pre>
+
+Со всякого рода правилами и исключениями при ошибках форматирования исходного файла данных.
+
+Загрузка выполнялась 3 минуты.
+
+Проверяем наличие данных в таблице после загрузки.
+
+<pre><code>
+SELECT count() FROM recipes;
+
+Query id: 1300a607-0cc6-4fef-aea5-0f15d4a5ab62
+
+┌─count()─┐
+│ 2231142 │
+└─────────┘
+
+1 row in set. Elapsed: 0.002 sec.
+</code></pre>
+
+Проверим самые сложные рецепты с имбирём
+
+<pre><code>
+SELECT
+    title,
+    length(NER),
+    length(directions)
+FROM recipes
+WHERE has(NER, 'ginger')
+ORDER BY length(directions) DESC
+LIMIT 10;
+
+Query id: ddd9f652-3468-4eb7-9ce6-edb580dd0165
+
+┌─title──────────────────────────────────────────────────────────────────────────────────────────────────────┬─length(NER)─┬─length(directions)─┐
+│ Moon Cakes                                                                                                 │          27 │                164 │
+│ California Rolls                                                                                           │          12 │                143 │
+│ Inside Out Peanut Cake                                                                                     │          17 │                 79 │
+│ Cloviss Lime Tart with Lime Marmalade and Ginger Ice Cream                                                 │          32 │                 75 │
+│ Pork Belly Big Squid Ramen                                                                                 │          18 │                 74 │
+│ Everyone Asks For This Shrimp Recipe                                                                       │           5 │                 70 │
+│ Mixed Korean Grill with Two Marinades: Bulgoki                                                             │          23 │                 69 │
+│ Shrimp and Eggplant Turnovers with Thai Seasoning                                                          │          24 │                 66 │
+│ Japanese Pork and Shrimp Pot Stickers                                                                      │          17 │                 64 │
+│ Pan Seared Wild Rockfish and Soft Shell Crab Tempura with Ginger and Yuzu Glaze, Cucumber and Toasted Nori │          17 │                 64 │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────┴─────────────┴────────────────────┘
+
+10 rows in set. Elapsed: 9.713 sec. Processed 2.23 million rows, 1.65 GB (229.70 thousand rows/s., 169.59 MB/s.)
+</code></pre>
+
+Посмотрим на парты
+<pre><code>
+SELECT
+    table,
+    partition,
+    name,
+    rows,
+    disk_name
+FROM system.parts;
+
+┌─table───────────────────┬─partition─┬─name─────────────┬────rows─┬─disk_name─┐
+│ recipes                 │ tuple()   │ all_1_1_0        │  376336 │ default   │
+│ recipes                 │ tuple()   │ all_1_6_1        │ 1624074 │ default   │
+│ recipes                 │ tuple()   │ all_2_2_0        │  377443 │ default   │
+│ recipes                 │ tuple()   │ all_3_3_0        │  273588 │ default   │
+│ recipes                 │ tuple()   │ all_4_4_0        │  207267 │ default   │
+│ recipes                 │ tuple()   │ all_5_5_0        │  188321 │ default   │
+│ recipes                 │ tuple()   │ all_6_6_0        │  201119 │ default   │
+│ recipes                 │ tuple()   │ all_7_7_0        │  200448 │ default   │
+│ recipes                 │ tuple()   │ all_8_8_0        │  199937 │ default   │
+│ recipes                 │ tuple()   │ all_9_9_0        │  199629 │ default   │
+│ recipes                 │ tuple()   │ all_10_10_0      │    7054 │ default   │
+......
+</code></pre>
+
+Оптимизируем таблицу 
+<pre><code>
+OPTIMIZE TABLE recipes FINAL
+
+Query id: ec84f235-1940-4660-9434-f1571676333f
+
+0 rows in set. Elapsed: 35.060 sec.
+
+Received exception from server (version 23.4.1):
+Code: 241. DB::Exception: Received from localhost:9000. DB::Exception: Memory limit (total) exceeded: would use 1.79 GiB (attempt to allocate chunk of 5128896 bytes), maximum: 1.74 GiB. OvercommitTracker decision: Memory overcommit isn't used. Waiting time or overcommit denominator are set to zero.: (while reading column NER): (while reading from part /var/lib/clickhouse/store/f2e/f2e60ea4-899f-4e7b-83ae-2e155845b1ad/all_1_6_1/ from mark 142 with max_rows_to_read = 8192): While executing MergeTreeSequentialSource. (MEMORY_LIMIT_EXCEEDED)
+
+</code></pre>
+
+Добавим 2GB памяти и повторим попытку.
+<pre><code>
+yc compute instance update ch-db1 --memory 4
+yc compute instance start ch-db1
+</code></pre>
+Повторяем
+
+<pre><code>
+
+OPTIMIZE TABLE recipes FINAL
+
+Query id: 42820b42-1226-4507-aaa4-5187de892549
+
+Ok.
+
+0 rows in set. Elapsed: 50.959 sec.
+</code></pre>
+
+Смотрим парты
+<pre><code>
+
+SELECT
+    table,
+    partition,
+    name,
+    rows,
+    disk_name
+FROM system.parts
+
+Query id: 86c0d7b1-3871-46d6-89f4-f7c7f8fc6583
+
+┌─table───────────────────┬─partition─┬─name─────────────┬────rows─┬─disk_name─┐
+│ recipes                 │ tuple()   │ all_1_6_1        │ 1624074 │ default   │
+│ recipes                 │ tuple()   │ all_1_10_2       │ 2231142 │ default   │
+│ recipes                 │ tuple()   │ all_7_7_0        │  200448 │ default   │
+│ recipes                 │ tuple()   │ all_8_8_0        │  199937 │ default   │
+│ recipes                 │ tuple()   │ all_9_9_0        │  199629 │ default   │
+│ recipes                 │ tuple()   │ all_10_10_0      │    7054 │ default   │
+
+</code></pre>
+
+
+Повторим запрос с апельсином в рецептах
+<pre><code>
+
+SELECT
+    title,
+    length(NER),
+    length(directions)
+FROM recipes
+WHERE has(NER, 'orange')
+ORDER BY length(directions) DESC
+LIMIT 10
+
+Query id: 21d348c7-6af0-4e45-af0f-47c567170f10
+
+┌─title─────────────────────────────────────────────────────────────────────────────┬─length(NER)─┬─length(directions)─┐
+│ Roast Turkey and Pan Sauce                                                        │          34 │                113 │
+│ Panettone                                                                         │          16 │                108 │
+│ Taste of Italy                                                                    │          50 │                 92 │
+│ Stollen                                                                           │          19 │                 85 │
+│ Citrus Vanilla Panna Cotta on Oat Granola Base with Dried Fruit and Apple Compote │          38 │                 70 │
+│ Biscotti with Caramelized Hazelnuts                                               │          18 │                 67 │
+│ Duck Braised in Banyuls and Turnip-Parsnip Gratin with Prunes                     │          20 │                 64 │
+│ Grilled Quail With Black Bean Torta and Poblano Sauce                             │          39 │                 64 │
+│ Hazelnut and Orange Macaroons                                                     │          14 │                 59 │
+│ Herb-Rubbed Duck with Tart Cherry and Sage Sauce                                  │          20 │                 59 │
+└───────────────────────────────────────────────────────────────────────────────────┴─────────────┴────────────────────┘
+
+10 rows in set. Elapsed: 1.654 sec. Processed 2.23 million rows, 1.64 GB (1.35 million rows/s., 990.75 MB/s.)
+</code></pre>
+
+Производительность существенно выросла.
+
+
+
+Правим конфигурационный файл /etc/clickhouse-server/config.xml на тему включения шардирования из трёх нод и слушания ipv4
+```xml
+    <listen_host>0.0.0.0</listen_host>
+	
+    <remote_servers>
+        <otus_course_cl>
+            <shard>
+               <internal_replication>false</internal_replication>
+                <replica>
+                    <host>ch-db1</host>
+                    <port>9000</port>
+                     <user>default</user>
+                     <password>admin123</password>
+                </replica>
+                <replica>
+                    <host>ch-db2</host>
+                    <port>9000</port>
+                     <user>default</user>
+                     <password>admin123</password>
+                </replica>
+            </shard>
+            <shard>
+                    <weight>2</weight>
+                    <internal_replication>false</internal_replication>
+                <replica>
+                    <host>ch-db3</host>
+                    <port>9000</port>
+                     <user>default</user>
+                     <password>admin123</password>
+                </replica>
+                <replica>
+                    <host>ch-db4</host>
+                    <port>9000</port>
+                     <user>default</user>
+                     <password>admin123</password>
+                </replica>
+            </shard>
+        </otus_course_cl>
+    </remote_servers>
+```
+
+
+Создаём ещё две ноды и повторяем конфигурацию remote_servers на них.
+Имя кластера - otus_course_cl
+Ноды - ch-db{1,2,3,4}
+
+Смотрим конфигурацию кластера
+<pre><code>select * from system.clusters;
+Query id: d970f1bd-f6b3-43e4-a0a9-cca0e78afb7a
+
+┌─cluster────────┬─shard_num─┬─shard_weight─┬─replica_num─┬─host_name─┬─host_address─┬─port─┬─is_local─┬─user────┬─default_database─┬─errors_count─┬─slowdowns_count─┬─estimated_recovery_time─┐
+│ otus_course_cl │         1 │            1 │           1 │ ch-db1    │ 10.130.0.33  │ 9000 │        1 │ default │                  │            0 │               0 │                       0 │
+│ otus_course_cl │         1 │            1 │           2 │ ch-db2    │ 10.130.0.5   │ 9000 │        0 │ default │                  │            0 │               0 │                       0 │
+│ otus_course_cl │         2 │            2 │           1 │ ch-db3    │ 10.130.0.31  │ 9000 │        0 │ default │                  │            0 │               0 │                       0 │
+│ otus_course_cl │         2 │            2 │           2 │ ch-db4    │ 10.130.0.18  │ 9000 │        0 │ default │                  │            0 │               0 │                       0 │
+└────────────────┴───────────┴──────────────┴─────────────┴───────────┴──────────────┴──────┴──────────┴─────────┴──────────────────┴──────────────┴─────────────────┴─────────────────────────┘
+</code></pre>
+
+На каждой ноде кластера создаём локальную таблицу.
+<pre><code>
+CREATE DATABASE IF NOT EXISTS db;
+CREATE TABLE db.recipes
+(   num   UInt32 default rand64() % 16,
+    title String,
+    ingredients Array(String),
+    directions Array(String),
+    link String,
+    source LowCardinality(String),
+    NER Array(String)
+) ENGINE = MergeTree 
+  PARTITION BY num
+  ORDER BY (title);
+</code></pre>
+
+А на мастер ноде создаём уже шардированную таблицу
+
+<pre><code>
+CREATE TABLE IF NOT EXISTS db.recipes_shard as db.recipes ENGINE = Distributed('otus_course_cl', 'db', 'recipes', rand());
+</code></pre>
+
+И пробуем заполнить её данными.
+
+<pre><code>
+clickhouse-client --password --query "
+    INSERT INTO db.recipes_shard(title,ingredients,directions,link,source,NER)
+    SELECT
+        title,
+        JSONExtract(ingredients, 'Array(String)'),
+        JSONExtract(directions, 'Array(String)'),
+        link,
+        source,
+        JSONExtract(NER, 'Array(String)')
+    FROM input('num UInt32, title String, ingredients String, directions String, link String, source LowCardinality(String), NER String')
+    FORMAT CSVWithNames
+" --input_format_with_names_use_header 0 --format_csv_allow_single_quote 0 --input_format_allow_errors_num 10 < full_dataset.csv
+</code></pre>
+
+Пробуем запустить запрос про рецепты с апельсином.
+
+<pre><code>
+
+SELECT
+    title,
+    length(NER),
+    length(directions)
+FROM db.recipes_shard
+WHERE has(NER, 'orange')
+ORDER BY length(directions) DESC
+LIMIT 10
+
+Query id: 589c1c63-7cea-4797-b611-1f1bbd147571
+
+┌─title─────────────────────────────────────────────────────────────────────────────┬─length(NER)─┬─length(directions)─┐
+│ Roast Turkey and Pan Sauce                                                        │          34 │                113 │
+│ Panettone                                                                         │          16 │                108 │
+│ Taste of Italy                                                                    │          50 │                 92 │
+│ Stollen                                                                           │          19 │                 85 │
+│ Citrus Vanilla Panna Cotta on Oat Granola Base with Dried Fruit and Apple Compote │          38 │                 70 │
+│ Biscotti with Caramelized Hazelnuts                                               │          18 │                 67 │
+│ Duck Braised in Banyuls and Turnip-Parsnip Gratin with Prunes                     │          20 │                 64 │
+│ Grilled Quail With Black Bean Torta and Poblano Sauce                             │          39 │                 64 │
+│ Hazelnut and Orange Macaroons                                                     │          14 │                 59 │
+│ Herb-Rubbed Duck with Tart Cherry and Sage Sauce                                  │          20 │                 59 │
+└───────────────────────────────────────────────────────────────────────────────────┴─────────────┴────────────────────┘
+
+10 rows in set. Elapsed: 1.318 sec. Processed 2.14 million rows, 1.59 GB (1.63 million rows/s., 1.20 GB/s.)
+
+SELECT
+    title,
+    length(NER),
+    length(directions)
+FROM db.recipes_shard
+WHERE has(NER, 'ginger')
+ORDER BY length(directions) DESC
+LIMIT 10
+
+Query id: a5f7f0b1-18aa-41a8-bf6c-bcb19c7f6437
+
+┌─title──────────────────────────────────────────────────────────────────────────────────────────────────────┬─length(NER)─┬─length(directions)─┐
+│ Moon Cakes                                                                                                 │          27 │                164 │
+│ California Rolls                                                                                           │          12 │                143 │
+│ Inside Out Peanut Cake                                                                                     │          17 │                 79 │
+│ Cloviss Lime Tart with Lime Marmalade and Ginger Ice Cream                                                 │          32 │                 75 │
+│ Pork Belly Big Squid Ramen                                                                                 │          18 │                 74 │
+│ Everyone Asks For This Shrimp Recipe                                                                       │           5 │                 70 │
+│ Mixed Korean Grill with Two Marinades: Bulgoki                                                             │          23 │                 69 │
+│ Shrimp and Eggplant Turnovers with Thai Seasoning                                                          │          24 │                 66 │
+│ Japanese Pork and Shrimp Pot Stickers                                                                      │          17 │                 64 │
+│ Pan Seared Wild Rockfish and Soft Shell Crab Tempura with Ginger and Yuzu Glaze, Cucumber and Toasted Nori │          17 │                 64 │
+└────────────────────────────────────────────────────────────────────────────────────────────────────────────┴─────────────┴────────────────────┘
+
+10 rows in set. Elapsed: 1.334 sec. Processed 2.16 million rows, 1.60 GB (1.62 million rows/s., 1.20 GB/s.)
+
+</code></pre>
+
+
